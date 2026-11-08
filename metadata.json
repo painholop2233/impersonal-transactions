@@ -1,0 +1,6 @@
+{
+  "name": "MOEX Anonymous Trades & Delta Analyzer",
+  "description": "Аналитика обезличенных сделок Московской Биржи (MOEX): расчет дельты покупок и продаж в рублях по акциям и фьючерсам, кумулятивная дельта и отчеты.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
