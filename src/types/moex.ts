@@ -96,7 +96,11 @@ export interface DeltaReport {
   selectedSession: 'all' | 'day' | 'evening' | 'morning';
   timeRange: { start: string; end: string };
   generatedAt: string;
+  dataSource?: string;
+  isSimulated?: boolean;
   isFullDayTape: boolean; // Indicates 100% of the trading day trades were processed
+  openPrice?: number;
+  closePrice?: number;
   totalTradesInDay: number;
   tradesCount: number;
   buyTradesCount: number;

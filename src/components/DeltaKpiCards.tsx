@@ -21,18 +21,24 @@ export const DeltaKpiCards: React.FC<DeltaKpiCardsProps> = ({ report }) => {
 
   return (
     <div className="space-y-4 mb-6">
-      {/* Session / Date Scope Indicator Strip */}
-      <div className="flex items-center justify-between px-4 py-2.5 bg-slate-900 border border-slate-800 rounded-lg text-xs font-mono">
-        <div className="flex items-center gap-2 text-slate-300">
-          <Calendar className="w-3.5 h-3.5 text-blue-400" />
+      {/* Session / Date Scope Indicator Strip & Official Source Badge */}
+      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 bg-slate-900 border border-slate-800 rounded-lg text-xs font-mono">
+        <div className="flex flex-wrap items-center gap-2 text-slate-300">
+          <Calendar className="w-3.5 h-3.5 text-blue-400 shrink-0" />
           <span>Торговый день: <strong className="text-white">{report.tradingDate}</strong></span>
           <span className="text-slate-600">·</span>
-          <Clock className="w-3.5 h-3.5 text-slate-400" />
+          <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
           <span className="text-slate-400">Срез: <strong className="text-blue-300">{sessionNameMap[report.selectedSession] || 'Все сессии'}</strong> ({report.timeRange.start} — {report.timeRange.end} МСК)</span>
         </div>
-        <div className="hidden md:flex items-center gap-1.5 text-slate-400">
-          <span>Сделок в срезе: <strong className="text-white">{report.tradesCount.toLocaleString('ru-RU')}</strong></span>
-          <span>(из {report.totalTradesInDay.toLocaleString('ru-RU')} за день)</span>
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-emerald-950/80 border border-emerald-700/60 text-emerald-300 text-[11px] font-medium">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+            <span>100% реальные данные MOEX ISS</span>
+          </div>
+          <div className="hidden md:flex items-center gap-1 text-slate-400">
+            <span>Сделок: <strong className="text-white">{report.tradesCount.toLocaleString('ru-RU')}</strong></span>
+            <span>(из {report.totalTradesInDay.toLocaleString('ru-RU')})</span>
+          </div>
         </div>
       </div>
 

@@ -9,6 +9,7 @@ import { WhaleTape } from './components/WhaleTape';
 import { TradesTable } from './components/TradesTable';
 import { AiAnalysisCard } from './components/AiAnalysisCard';
 import { PrintReportView } from './components/PrintReportView';
+import { GoogleSheetsModal } from './components/GoogleSheetsModal';
 import { MarketType, DeltaReport, ReportFilterConfig } from './types/moex';
 import { formatRublesExact, formatPercent, formatLots } from './utils/formatters';
 import { AlertCircle, Copy, Check, FileSpreadsheet, RefreshCw, Calendar, Sparkles } from 'lucide-react';
@@ -28,8 +29,9 @@ export default function App() {
   const [report, setReport] = useState<DeltaReport | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
-  const [autoRefresh, setAutoRefresh] = useState<boolean>(false);
+  const [autoRefresh, setAutoRefresh] = useState<boolean>(true);
   const [isAiOpen, setIsAiOpen] = useState<boolean>(false);
+  const [isSheetsOpen, setIsSheetsOpen] = useState<boolean>(false);
   const [copiedSummary, setCopiedSummary] = useState<boolean>(false);
 
   // Fetch full trading day report from server
@@ -71,12 +73,12 @@ export default function App() {
     loadReport();
   }, [loadReport]);
 
-  // Auto-refresh interval
+  // Auto-refresh interval (every 30 seconds)
   useEffect(() => {
     if (!autoRefresh) return;
     const interval = setInterval(() => {
       loadReport();
-    }, 20000);
+    }, 30000);
     return () => clearInterval(interval);
   }, [autoRefresh, loadReport]);
 
@@ -154,6 +156,7 @@ export default function App() {
         setAutoRefresh={setAutoRefresh}
         onPrint={handlePrint}
         onOpenAi={() => setIsAiOpen(true)}
+        onOpenSheets={() => setIsSheetsOpen(true)}
       />
 
       {/* Main Workspace Container */}
@@ -237,19 +240,28 @@ export default function App() {
 
               <div className="flex items-center gap-2">
                 <button
+                  onClick={() => setIsSheetsOpen(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-emerald-300 bg-emerald-950/60 hover:bg-emerald-900/60 border border-emerald-800/80 rounded transition-colors"
+                  title="Открыть скрипт и инструкцию для Google Таблиц"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Google Таблицы (23:55)</span>
+                </button>
+
+                <button
                   onClick={handleCopySummary}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-slate-300 bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded transition-colors"
                   title="Скопировать текстовую сводку дня и сессий в буфер"
                 >
                   {copiedSummary ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                  <span>{copiedSummary ? 'Скопировано!' : 'Копировать сводку дня'}</span>
+                  <span>{copiedSummary ? 'Скопировано!' : 'Копировать сводку'}</span>
                 </button>
 
                 <button
                   onClick={handleExportCsv}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-slate-300 bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded transition-colors"
                 >
-                  <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+                  <FileSpreadsheet className="w-3.5 h-3.5 text-slate-400" />
                   <span>Экспорт CSV ({report.tradesCount})</span>
                 </button>
               </div>
@@ -377,6 +389,12 @@ export default function App() {
           onClose={() => setIsAiOpen(false)}
         />
       )}
+
+      {/* Google Sheets Integration Script Modal */}
+      <GoogleSheetsModal
+        isOpen={isSheetsOpen}
+        onClose={() => setIsSheetsOpen(false)}
+      />
 
       {/* Printable Report View (Visible only during window.print()) */}
       {report && <PrintReportView report={report} />}

@@ -10,6 +10,7 @@ interface HeaderProps {
   setAutoRefresh: (val: boolean) => void;
   onPrint: () => void;
   onOpenAi: () => void;
+  onOpenSheets: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -21,6 +22,7 @@ export const Header: React.FC<HeaderProps> = ({
   setAutoRefresh,
   onPrint,
   onOpenAi,
+  onOpenSheets,
 }) => {
   const navTabs = [
     { id: 'overview', label: 'Сводный отчет' },
@@ -32,7 +34,7 @@ export const Header: React.FC<HeaderProps> = ({
 
   return (
     <header className="sticky top-0 z-40 bg-slate-900/95 backdrop-blur-md border-b border-slate-800 text-slate-100 no-print">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-8">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-6">
         {/* Zone 1: Brand Wordmark */}
         <div className="flex items-center gap-3 shrink-0">
           <div className="w-8 h-8 rounded bg-red-600 flex items-center justify-center font-bold text-white tracking-wider text-xs shadow-sm">
@@ -69,18 +71,34 @@ export const Header: React.FC<HeaderProps> = ({
         </nav>
 
         {/* Zone 3: Actions */}
-        <div className="flex items-center gap-2.5 shrink-0">
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={onOpenSheets}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-emerald-300 bg-emerald-950/60 hover:bg-emerald-900/60 border border-emerald-700/60 hover:border-emerald-500 rounded transition-all whitespace-nowrap shadow-sm cursor-pointer"
+            title="Скрипт для автоматического опроса в Google Таблицы в 23:55 МСК"
+          >
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+            <span>Google Таблицы</span>
+          </button>
+
           <button
             onClick={() => setAutoRefresh(!autoRefresh)}
-            className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-mono rounded border transition-colors whitespace-nowrap ${
+            className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-mono rounded-md border transition-all whitespace-nowrap cursor-pointer ${
               autoRefresh
-                ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800/80'
-                : 'bg-slate-800/80 text-slate-400 border-slate-700 hover:text-slate-200'
+                ? 'bg-emerald-950/80 text-emerald-300 border-emerald-600/80 shadow-[0_0_12px_rgba(16,185,129,0.2)] ring-1 ring-emerald-500/40 hover:bg-emerald-900/60 hover:border-emerald-500'
+                : 'bg-slate-800/80 text-slate-400 border-slate-700 hover:text-slate-200 hover:bg-slate-800'
             }`}
-            title="Автообновление данных каждые 15 сек"
+            title="Автообновление данных каждые 30 сек (нажмите для переключения)"
           >
-            <Activity className={`w-3.5 h-3.5 ${autoRefresh ? 'animate-pulse text-emerald-400' : ''}`} />
-            <span>Авто 15с: {autoRefresh ? 'ВКЛ' : 'ВЫКЛ'}</span>
+            {autoRefresh ? (
+              <span className="relative flex h-2 w-2 shrink-0">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+            ) : (
+              <Activity className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+            )}
+            <span>Авто 30с: <strong className={autoRefresh ? 'text-emerald-200' : 'text-slate-400'}>{autoRefresh ? 'ВКЛ' : 'ВЫКЛ'}</strong></span>
           </button>
 
           <button
@@ -95,20 +113,20 @@ export const Header: React.FC<HeaderProps> = ({
 
           <button
             onClick={onOpenAi}
-            className="flex items-center gap-2 px-3.5 py-1.5 text-xs font-semibold text-amber-200 bg-gradient-to-r from-amber-500/20 via-amber-400/15 to-amber-600/20 hover:from-amber-500/30 hover:to-amber-600/30 border border-amber-500/50 hover:border-amber-400 rounded-md transition-all shadow-[0_0_12px_rgba(245,158,11,0.15)] hover:shadow-[0_0_18px_rgba(245,158,11,0.25)] ring-1 ring-amber-400/30 active:scale-[0.98] whitespace-nowrap cursor-pointer"
+            className="flex items-center gap-2 px-3 py-1.5 text-xs font-semibold text-amber-200 bg-gradient-to-r from-amber-500/20 via-amber-400/15 to-amber-600/20 hover:from-amber-500/30 hover:to-amber-600/30 border border-amber-500/50 hover:border-amber-400 rounded-md transition-all shadow-[0_0_12px_rgba(245,158,11,0.15)] hover:shadow-[0_0_18px_rgba(245,158,11,0.25)] ring-1 ring-amber-400/30 active:scale-[0.98] whitespace-nowrap cursor-pointer"
             title="Запустить мгновенный количественный и AI анализ дельты дня"
           >
             <Sparkles className="w-3.5 h-3.5 text-amber-400 animate-pulse shrink-0" />
-            <span className="font-medium">AI Анализ потока</span>
+            <span className="font-medium hidden sm:inline">AI Анализ</span>
           </button>
 
           <button
             onClick={onPrint}
-            className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-500 rounded transition-colors whitespace-nowrap shadow-sm"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-500 rounded transition-colors whitespace-nowrap shadow-sm"
             title="Печать или экспорт в PDF"
           >
             <Printer className="w-3.5 h-3.5" />
-            <span>Отчет PDF</span>
+            <span>PDF</span>
           </button>
         </div>
       </div>
