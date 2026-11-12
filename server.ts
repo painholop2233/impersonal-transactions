@@ -98,7 +98,12 @@ async function fetchMoex(url: string, timeoutMs = 8000): Promise<any> {
     if (!res.ok) {
       throw new Error(`MOEX API error: ${res.status} ${res.statusText}`);
     }
-    return await res.json();
+    const rawText = await res.text();
+    // Preserve 15+ digit integer IDs (such as 19-digit FORTS TRADENO) as exact strings before JSON.parse
+    const safeText = rawText.replace(/"(?:\\.|[^"\\])*"|(?<![.\d])(\d{15,})(?![.\d])/g, (m, num) =>
+      num ? `"${num}"` : m
+    );
+    return JSON.parse(safeText);
   } finally {
     clearTimeout(id);
   }
@@ -272,92 +277,286 @@ async function getSecuritySpec(market: 'stocks' | 'futures', ticker: string) {
   }
 }
 
-// 3. Helper to fetch ALL trades for the entire trading day across all sessions
-async function fetchAllDayTrades(market: 'stocks' | 'futures', ticker: string, spec: any): Promise<any[]> {
-  const cacheKey = `all_trades_${market}_${ticker}`;
-  const cached = getCached<any[]>(cacheKey, TRADES_CACHE_TTL_MS);
-  if (cached) return cached;
+// Helper to compare huge numeric MOEX trade numbers safely (19-digit FORTS IDs exceed JS MAX_SAFE_INTEGER)
+function compareTradeNo(a: string, b: string): number {
+  const sa = String(a || '').replace(/\D/g, '');
+  const sb = String(b || '').replace(/\D/g, '');
+  if (sa.length !== sb.length) return sa.length - sb.length;
+  return sa < sb ? -1 : sa > sb ? 1 : 0;
+}
 
-  const allTrades: any[] = [];
-  let start = 0;
-  const maxIterations = 12; // up to 60,000 trades per instrument (covers complete trading days)
+// Persistent per-day trade tape store for fast incremental updates & zero cold-reload throttling
+interface DayTapeEntry {
+  trades: any[];
+  lastTradeNo: string;
+  tradingDate: string;
+  lastCheckedAt: number;
+}
+const dayTapeCache = new Map<string, DayTapeEntry>();
+const inFlightTradeFetches = new Map<string, Promise<any[]>>();
 
-  for (let iter = 0; iter < maxIterations; iter++) {
-    const endpoint = market === 'stocks'
-      ? `https://iss.moex.com/iss/engines/stock/markets/shares/boards/tqbr/securities/${ticker}/trades.json?start=${start}&limit=5000`
-      : `https://iss.moex.com/iss/engines/futures/markets/forts/boards/rfud/securities/${ticker}/trades.json?start=${start}&limit=5000`;
+function parseRawMoexTrades(rows: any[], cols: string[], market: 'stocks' | 'futures', ticker: string, spec: any): any[] {
+  const noIdx = cols.indexOf('TRADENO');
+  const timeIdx = cols.indexOf('TRADETIME');
+  const dateIdx = cols.indexOf('TRADEDATE');
+  const sessionDateIdx = cols.indexOf('TRADE_SESSION_DATE');
+  const pIdx = cols.indexOf('PRICE');
+  const qIdx = cols.indexOf('QUANTITY');
+  const valIdx = cols.indexOf('VALUE');
+  const bsIdx = cols.indexOf('BUYSELL');
+  const bIdx = cols.indexOf('BOARDID') !== -1 ? cols.indexOf('BOARDID') : cols.indexOf('BOARDNAME');
 
-    const data = await fetchMoex(endpoint);
-    if (!data?.trades?.data || data.trades.data.length === 0) {
-      break;
+  const parsed: any[] = [];
+  for (const r of rows) {
+    const price = Number(r[pIdx]);
+    const qty = Number(r[qIdx]);
+    const bs = (r[bsIdx] || 'B').toUpperCase();
+    const time = String(r[timeIdx] || '');
+    const tradeDate = String(r[dateIdx] || '');
+    const sessionDate = sessionDateIdx !== -1 && r[sessionDateIdx] ? String(r[sessionDateIdx]) : tradeDate;
+
+    if (!price || !qty || (bs !== 'B' && bs !== 'S')) continue;
+
+    let tradeValueRub = 0;
+    if (market === 'stocks') {
+      tradeValueRub = valIdx !== -1 && r[valIdx] ? Number(r[valIdx]) : (price * qty);
+    } else {
+      const minStep = spec.minStep || 1;
+      const stepPrice = spec.stepPrice || 1;
+      tradeValueRub = (price / minStep) * stepPrice * qty;
     }
 
-    const cols = data.trades.columns;
-    const noIdx = cols.indexOf('TRADENO');
-    const timeIdx = cols.indexOf('TRADETIME');
-    const dateIdx = cols.indexOf('TRADEDATE');
-    const sessionDateIdx = cols.indexOf('TRADE_SESSION_DATE');
-    const pIdx = cols.indexOf('PRICE');
-    const qIdx = cols.indexOf('QUANTITY');
-    const valIdx = cols.indexOf('VALUE');
-    const bsIdx = cols.indexOf('BUYSELL');
-    const bIdx = cols.indexOf('BOARDID') !== -1 ? cols.indexOf('BOARDID') : cols.indexOf('BOARDNAME');
+    let sessionType: 'morning' | 'day' | 'evening' = 'day';
+    if (time < '10:00:00') {
+      sessionType = 'morning';
+    } else if (time >= '19:00:00') {
+      sessionType = 'evening';
+    }
 
-    for (const r of data.trades.data) {
-      const price = Number(r[pIdx]);
-      const qty = Number(r[qIdx]);
-      const bs = (r[bsIdx] || 'B').toUpperCase();
-      const time = String(r[timeIdx] || '');
-      const tradeDate = String(r[dateIdx] || '');
-      const sessionDate = sessionDateIdx !== -1 && r[sessionDateIdx] ? String(r[sessionDateIdx]) : tradeDate;
+    parsed.push({
+      tradeNo: String(r[noIdx]),
+      time,
+      date: tradeDate,
+      sessionDate,
+      sessionType,
+      secId: ticker,
+      price,
+      quantity: qty,
+      valueRub: Math.round(tradeValueRub * 100) / 100,
+      buySell: bs,
+      board: r[bIdx] || spec.board
+    });
+  }
+  return parsed;
+}
 
-      if (!price || !qty || (bs !== 'B' && bs !== 'S')) continue;
+async function fetchTradesPageWithRetry(url: string, retries = 2, timeoutMs = 10000): Promise<any> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const data = await fetchMoex(url, timeoutMs);
+      if (data?.trades?.data) return data;
+    } catch {
+      // retry transient failure
+    }
+    if (attempt < retries) {
+      await new Promise(r => setTimeout(r, 250 * (attempt + 1)));
+    }
+  }
+  return null;
+}
 
-      let tradeValueRub = 0;
-      if (market === 'stocks') {
-        tradeValueRub = valIdx !== -1 && r[valIdx] ? Number(r[valIdx]) : (price * qty);
-      } else {
-        const minStep = spec.minStep || 1;
-        const stepPrice = spec.stepPrice || 1;
-        tradeValueRub = (price / minStep) * stepPrice * qty;
+// 3. Helper to fetch ALL trades for the entire trading day across all sessions (no 60k cap!)
+async function fetchAllDayTrades(market: 'stocks' | 'futures', ticker: string, spec: any): Promise<any[]> {
+  const key = `${market}_${ticker}`;
+  const existing = dayTapeCache.get(key);
+
+  if (existing && Date.now() - existing.lastCheckedAt < TRADES_CACHE_TTL_MS) {
+    return existing.trades;
+  }
+
+  const pending = inFlightTradeFetches.get(key);
+  if (pending) return pending;
+
+  const task = (async () => {
+    const baseEndpoint = market === 'stocks'
+      ? `https://iss.moex.com/iss/engines/stock/markets/shares/boards/tqbr/securities/${ticker}/trades.json`
+      : `https://iss.moex.com/iss/engines/futures/markets/forts/boards/rfud/securities/${ticker}/trades.json`;
+
+    // Fast incremental path if we already cached earlier trades from the SAME trading day
+    if (existing && existing.trades.length > 0 && existing.lastTradeNo) {
+      try {
+        const probe = await fetchTradesPageWithRetry(`${baseEndpoint}?reversed=1&limit=1&iss.meta=off`, 1, 6000);
+        const probeRows = probe?.trades?.data || [];
+        if (probeRows.length === 0) {
+          dayTapeCache.delete(key);
+          return [];
+        }
+        const dateIdx = (probe.trades.columns || []).indexOf('TRADEDATE');
+        const latestDate = String(probeRows[0][dateIdx] || '');
+
+        if (latestDate === existing.tradingDate) {
+          const seen = new Set(existing.trades.map(t => t.tradeNo));
+          let cursor = existing.lastTradeNo;
+          const newTrades: any[] = [];
+
+          for (let hop = 0; hop < 30; hop++) {
+            const page = await fetchTradesPageWithRetry(`${baseEndpoint}?tradeno=${cursor}&limit=5000&iss.meta=off`, 2, 10000);
+            const rows = page?.trades?.data || [];
+            if (rows.length === 0) break;
+
+            const parsed = parseRawMoexTrades(rows, page.trades.columns, market, ticker, spec);
+            let addedInHop = 0;
+            for (const t of parsed) {
+              if (!seen.has(t.tradeNo)) {
+                seen.add(t.tradeNo);
+                newTrades.push(t);
+                addedInHop++;
+              }
+            }
+            const noIdx = page.trades.columns.indexOf('TRADENO');
+            cursor = String(rows[rows.length - 1][noIdx]);
+            if (rows.length < 5000 || addedInHop === 0) break;
+          }
+
+          if (newTrades.length > 0) {
+            existing.trades = [...existing.trades, ...newTrades];
+            existing.lastTradeNo = existing.trades[existing.trades.length - 1].tradeNo;
+          }
+          existing.lastCheckedAt = Date.now();
+          return existing.trades;
+        }
+      } catch {
+        // fall through to full day reload if incremental check fails
+      }
+    }
+
+    // Full-day load:
+    // Step A: Probe start=0 and spec.marketNumTrades. Keep SQL OFFSET <= 100,000 (fast on MOEX),
+    // then advance smoothly via indexed tradeno= cursor to the exact end of the trading day.
+    const expectedTotal = Number(spec?.marketNumTrades) || 0;
+    const parallelCap = Math.min(Math.max(0, expectedTotal - 5000), 65000);
+    const offsets: number[] = [];
+    for (let s = 0; s <= parallelCap; s += 5000) {
+      offsets.push(s);
+    }
+    if (offsets.length === 0) offsets.push(0);
+
+    const byTradeNo = new Map<string, any>();
+    const rawLastNoByOffset = new Map<number, string>();
+    const batchSize = 5; // Optimal concurrency for MOEX ISS
+    let reachedNaturalEnd = false;
+
+    const failedOffsets: number[] = [];
+
+    for (let i = 0; i < offsets.length; i += batchSize) {
+      const batch = offsets.slice(i, i + batchSize);
+      const pages = await Promise.all(
+        batch.map(async (offset) => {
+          const data = await fetchTradesPageWithRetry(`${baseEndpoint}?start=${offset}&limit=5000&iss.meta=off`, 2, 10000);
+          return { offset, data };
+        })
+      );
+
+      for (const { offset, data } of pages) {
+        if (!data) {
+          failedOffsets.push(offset);
+          continue;
+        }
+        const rows = data?.trades?.data || [];
+        if (rows.length === 0) {
+          if (offset === 0) {
+            return []; // Exchange buffer cleared (e.g. post-clearing/weekend) -> let official candles handle it
+          }
+          if (offset < parallelCap) {
+            failedOffsets.push(offset);
+          }
+          continue;
+        }
+
+        const cols = data.trades.columns;
+        const noIdx = cols.indexOf('TRADENO');
+        rawLastNoByOffset.set(offset, String(rows[rows.length - 1][noIdx]));
+
+        const parsed = parseRawMoexTrades(rows, cols, market, ticker, spec);
+        for (const t of parsed) {
+          byTradeNo.set(t.tradeNo, t);
+        }
+        if (rows.length < 5000) {
+          reachedNaturalEnd = true;
+        }
       }
 
-      // Determine session classification
-      // Morning session: < 10:00:00
-      // Daytime main session: 10:00:00 - 18:49:59
-      // Evening session: >= 19:00:00
-      let sessionType: 'morning' | 'day' | 'evening' = 'day';
-      if (time < '10:00:00') {
-        sessionType = 'morning';
-      } else if (time >= '19:00:00') {
-        sessionType = 'evening';
+      if (reachedNaturalEnd) break;
+    }
+
+    // Sequentially retry any parallel offset that timed out so no middle gap remains
+    for (const offset of failedOffsets) {
+      const data = await fetchTradesPageWithRetry(`${baseEndpoint}?start=${offset}&limit=5000&iss.meta=off`, 2, 15000);
+      const rows = data?.trades?.data || [];
+      if (rows.length > 0) {
+        const parsed = parseRawMoexTrades(rows, data.trades.columns, market, ticker, spec);
+        for (const t of parsed) {
+          byTradeNo.set(t.tradeNo, t);
+        }
+      }
+    }
+
+    // Sort collected trades chronologically by tradeNo/time
+    let allTrades = Array.from(byTradeNo.values()).sort((a, b) => {
+      if (a.date !== b.date) return a.date.localeCompare(b.date);
+      if (a.time !== b.time) return a.time.localeCompare(b.time);
+      return compareTradeNo(a.tradeNo, b.tradeNo);
+    });
+
+    // Step B: Tail via indexed tradeno= cursor until the true end of the trading day
+    if (!reachedNaturalEnd && allTrades.length > 0) {
+      let cursor = allTrades[allTrades.length - 1].tradeNo;
+      for (let hop = 0; hop < 60; hop++) {
+        const page = await fetchTradesPageWithRetry(`${baseEndpoint}?tradeno=${cursor}&limit=5000&iss.meta=off`, 2, 10000);
+        const rows = page?.trades?.data || [];
+        if (rows.length === 0) break;
+
+        const cols = page.trades.columns;
+        const noIdx = cols.indexOf('TRADENO');
+        const nextCursor = String(rows[rows.length - 1][noIdx]);
+
+        const parsed = parseRawMoexTrades(rows, cols, market, ticker, spec);
+        let addedInHop = 0;
+        for (const t of parsed) {
+          if (!byTradeNo.has(t.tradeNo)) {
+            byTradeNo.set(t.tradeNo, t);
+            addedInHop++;
+          }
+        }
+
+        cursor = nextCursor;
+        if (rows.length < 5000 || addedInHop === 0) break;
       }
 
-      allTrades.push({
-        tradeNo: String(r[noIdx]),
-        time,
-        date: tradeDate,
-        sessionDate,
-        sessionType,
-        secId: ticker,
-        price,
-        quantity: qty,
-        valueRub: Math.round(tradeValueRub * 100) / 100,
-        buySell: bs,
-        board: r[bIdx] || spec.board
+      allTrades = Array.from(byTradeNo.values()).sort((a, b) => {
+        if (a.date !== b.date) return a.date.localeCompare(b.date);
+        if (a.time !== b.time) return a.time.localeCompare(b.time);
+        return compareTradeNo(a.tradeNo, b.tradeNo);
       });
     }
 
-    if (data.trades.data.length < 5000) {
-      break; // reached end of today's trade tape
+    if (allTrades.length > 0) {
+      const latest = allTrades[allTrades.length - 1];
+      dayTapeCache.set(key, {
+        trades: allTrades,
+        lastTradeNo: latest.tradeNo,
+        tradingDate: latest.date,
+        lastCheckedAt: Date.now(),
+      });
     }
-    start += 5000;
-  }
 
-  if (allTrades.length > 0) {
-    setCache(cacheKey, allTrades);
-  }
-  return allTrades;
+    return allTrades;
+  })().finally(() => {
+    inFlightTradeFetches.delete(key);
+  });
+
+  inFlightTradeFetches.set(key, task);
+  return task;
 }
 
 // 4. Fetch 100% REAL official data directly from Moscow Exchange (MOEX ISS)
@@ -511,7 +710,8 @@ app.get('/api/moex/report', async (req, res) => {
     // Sort all trades chronologically (oldest to newest)
     allDayTrades.sort((a, b) => {
       if (a.date !== b.date) return a.date.localeCompare(b.date);
-      return a.time.localeCompare(b.time);
+      if (a.time !== b.time) return a.time.localeCompare(b.time);
+      return compareTradeNo(a.tradeNo, b.tradeNo);
     });
 
     // Extract available dates in the dataset
@@ -611,8 +811,8 @@ app.get('/api/moex/report', async (req, res) => {
     };
 
     const tradesWithCum: any[] = [];
-    const timelineSample: any[] = [];
-    const sampleStep = Math.max(1, Math.floor(filteredTrades.length / 150));
+    const minuteSnapshots: any[] = [];
+    let currentMinute = '';
 
     for (let i = 0; i < filteredTrades.length; i++) {
       const t = filteredTrades[i];
@@ -658,17 +858,40 @@ app.get('/api/moex/report', async (req, res) => {
       };
       tradesWithCum.push(tradeWithDelta);
 
-      if (i % sampleStep === 0 || i === filteredTrades.length - 1) {
-        timelineSample.push({
-          time: t.time,
-          price: t.price,
-          cumDeltaRub: Math.round(runningCumDeltaRub),
-          cumDeltaLots: runningCumDeltaQty,
-          tradeValueRub: t.valueRub,
-          buySell: t.buySell,
-          sessionType: t.sessionType
-        });
+      // Build true time-based 1-minute snapshots across the entire trading day
+      const pt = {
+        time: t.time,
+        price: t.price,
+        cumDeltaRub: Math.round(runningCumDeltaRub),
+        cumDeltaLots: runningCumDeltaQty,
+        tradeValueRub: t.valueRub,
+        buySell: t.buySell,
+        sessionType: t.sessionType
+      };
+      const minuteKey = String(t.time || '').slice(0, 5);
+      if (i === 0) {
+        minuteSnapshots.push(pt);
+        currentMinute = minuteKey;
+      } else if (minuteKey !== currentMinute) {
+        minuteSnapshots.push(pt);
+        currentMinute = minuteKey;
+      } else {
+        // Update closing state for the current minute
+        minuteSnapshots[minuteSnapshots.length - 1] = pt;
       }
+    }
+
+    // Ensure high fidelity across full day while capping SVG payload at ~400 points
+    let timelineSample = minuteSnapshots;
+    if (minuteSnapshots.length > 400) {
+      const step = minuteSnapshots.length / 400;
+      const sampled: any[] = [];
+      for (let k = 0; k < 400; k++) {
+        sampled.push(minuteSnapshots[Math.min(Math.floor(k * step), minuteSnapshots.length - 1)]);
+      }
+      // Guarantee exact end of day point
+      sampled[sampled.length - 1] = minuteSnapshots[minuteSnapshots.length - 1];
+      timelineSample = sampled;
     }
 
     const netDeltaRub = totalBuyVal - totalSellVal;
@@ -727,6 +950,7 @@ app.get('/api/moex/report', async (req, res) => {
       dataSource: isLiveFromMoex
         ? 'MOEX ISS (Прямой онлайн-поток обезличенных сделок Московской Биржи)'
         : 'MOEX ISS (Официальный клиринговый реестр исполнения сделок Московской Биржи)',
+      isLiveFromMoex,
       isSimulated: false,
       isFullDayTape: true,
       totalTradesInDay: dayTrades.length,
